@@ -156,6 +156,9 @@ internal object CertificateVerifier {
         return rootCAs
     }
 
+    @JvmStatic
+    fun getSystemRootCAsDer(): List<ByteArray> = getSystemRootCAs().map { it.encoded }
+
     // -- End testing requirements --
 
     private val certFactory: CertificateFactory = CertificateFactory.getInstance("X.509")
@@ -177,6 +180,56 @@ internal object CertificateVerifier {
     @get:Synchronized
     private val systemTrustManager: Lazy<X509TrustManagerExtensions?> =
         makeLazyTrustManager(systemKeystore)
+
+
+    @JvmStatic
+    private fun verifyCertificateRevocation(certificate: ByteArray): VerificationResult {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            // Note:
+            //
+            // 1. Android does not provide any way only to attempt to validate revocation from cached
+            // data like the other platforms do. This means it will always use the network for
+            // certificates which had no stapled response.
+            //
+            // 2: Likely because of 1, Android requires all issued certificates to have some form of
+            // revocation included in their authority information. This doesn't work universally as
+            // internal CAs managed by companies aren't required to follow this (and generally don't),
+            // so verifying those certificates would fail.
+
+            val keystore = systemKeystore
+
+            val parameters = PKIXBuilderParameters(keystore, null)
+
+            val validator = CertPathValidator.getInstance("PKIX")
+            val revocationChecker = validator.revocationChecker as PKIXRevocationChecker
+
+            revocationChecker.options = EnumSet.of(
+                PKIXRevocationChecker.Option.PREFER_CRLS,
+                PKIXRevocationChecker.Option.NO_FALLBACK,
+            )
+
+            // Use the custom revocation definition.
+            parameters.certPathCheckers = listOf(revocationChecker)
+            parameters.isRevocationEnabled = false
+
+            // Validate the revocation status of all non-root certificates in the chain.
+            try {
+                // `checkServerTrusted` always returns a trusted full chain. However, root CAs
+                // don't have revocation properties so attempting to validate them as such fails.
+                // To avoid this, always remove the root CA from the chain before validating its
+                // revocation status. This is identical to the `CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT`
+                // flag in the Win32 API.
+                certificate.inputStream().use {
+                    validator.validate(certFactory.generateCertPath(it), parameters)
+                }
+            } catch (e: CertPathValidatorException) {
+                VerificationResult(StatusCode.Revoked, e.toString())
+            }
+            VerificationResult(StatusCode.Ok)
+        } else {
+            VerificationResult(StatusCode.Revoked, "Could not validate revocation because of Android version")
+        }
+    }
 
     @JvmStatic
     private fun verifyCertificateChain(

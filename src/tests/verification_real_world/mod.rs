@@ -129,10 +129,10 @@ fn real_world_test<E: std::error::Error>(test_case: &TestCase<E>) {
     let mut chain = test_case
         .chain
         .iter()
-        .map(|bytes| rustls::Certificate(bytes.to_vec()));
+        .map(|bytes| rustls_pki_types::CertificateDer::from(bytes.to_vec()));
 
     let end_entity_cert = chain.next().unwrap();
-    let intermediates: Vec<rustls::Certificate> = chain.collect();
+    let intermediates: Vec<rustls_pki_types::CertificateDer> = chain.collect();
 
     let server_name = rustls::client::ServerName::try_from(test_case.reference_id).unwrap();
 
@@ -143,9 +143,8 @@ fn real_world_test<E: std::error::Error>(test_case: &TestCase<E>) {
             &end_entity_cert,
             &intermediates,
             &server_name,
-            &mut std::iter::empty(),
             stapled_ocsp,
-            std::time::SystemTime::now(),
+            rustls_pki_types::UnixTime::now(),
         )
         .map(|_| ());
 

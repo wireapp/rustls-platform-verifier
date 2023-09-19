@@ -4,13 +4,15 @@ use jni::{
     JNIEnv,
 };
 use rustls::Error::InvalidCertificate;
-use rustls::{client::ServerCertVerifier, CertificateError, Error as TlsError, ServerName};
-use std::time::SystemTime;
+use rustls::{client::danger::ServerCertVerifier, CertificateError, Error as TlsError, ServerName, DigitallySignedStruct};
+use rustls::client::danger::HandshakeSignatureValid;
+use rustls_pki_types::CertificateDer;
+use crate::android::Error as AndroidError;
 
 use super::{log_server_cert, unsupported_server_name, ALLOWED_EKUS};
 use crate::android::{with_context, CachedClass};
 
-static CERT_VERIFIER_CLASS: CachedClass =
+pub(crate) static CERT_VERIFIER_CLASS: CachedClass =
     CachedClass::new("org/rustls/platformverifier/CertificateVerifier");
 
 // Find the `ByteArray (Uint8 [])` class.
@@ -20,7 +22,7 @@ static STRING_CLASS: CachedClass = CachedClass::new("java/lang/String");
 
 // Note: Keep these in sync with the Kotlin enum.
 #[derive(Debug)]
-enum VerifierStatus {
+pub(crate) enum VerifierStatus {
     Ok,
     Unavailable,
     Expired,
@@ -51,7 +53,7 @@ impl Drop for Verifier {
                 .v()?;
             Ok(())
         })
-        .expect("failed to clear test roots")
+            .expect("failed to clear test roots")
     }
 }
 
@@ -75,25 +77,19 @@ impl Verifier {
 
     fn verify_certificate(
         &self,
-        end_entity: &rustls::Certificate,
-        intermediates: &[rustls::Certificate],
+        end_entity: &CertificateDer,
+        intermediates: &[CertificateDer],
         server_name: &rustls::ServerName,
         server_name_str: &str,
         ocsp_response: Option<&[u8]>,
-        now: SystemTime,
+        now: rustls_pki_types::UnixTime,
     ) -> Result<(), TlsError> {
         let certificate_chain = std::iter::once(end_entity)
             .chain(intermediates)
             .map(|cert| cert.as_ref())
             .enumerate();
 
-        #[allow(clippy::as_conversions)]
-        let now: i64 = now
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-            .try_into()
-            .unwrap();
+        let now = (now.as_secs() * 1000).try_into().unwrap();
 
         let verification_result = with_context(|cx| {
             let env = cx.env();
@@ -147,22 +143,22 @@ impl Verifier {
                         "([B)V",
                         &[JValue::from(mock_root)],
                     )?
-                    .v()
-                    .expect("failed to add test root")
+                        .v()
+                        .expect("failed to add test root")
                 }
             }
 
             const VERIFIER_CALL: &str = concat!(
-                '(',
-                "Landroid/content/Context;",
-                "Ljava/lang/String;",
-                "Ljava/lang/String;",
-                "[Ljava/lang/String;",
-                "[B",
-                'J',
-                "[[B",
-                ')',
-                "Lorg/rustls/platformverifier/VerificationResult;"
+            '(',
+            "Landroid/content/Context;",
+            "Ljava/lang/String;",
+            "Ljava/lang/String;",
+            "[Ljava/lang/String;",
+            "[B",
+            'J',
+            "[[B",
+            ')',
+            "Lorg/rustls/platformverifier/VerificationResult;"
             );
 
             let result = env
@@ -185,6 +181,10 @@ impl Verifier {
             Ok(extract_result_info(env, result))
         });
 
+        Self::map_verification_result(verification_result, Some(end_entity), Some(&server_name))
+    }
+
+    pub(crate) fn map_verification_result(verification_result: Result<(VerifierStatus, Option<String>), AndroidError>, end_entity: Option<&CertificateDer>, server_name: Option<&ServerName>) -> Result<(), TlsError> {
         match verification_result {
             Ok((status, maybe_msg)) => {
                 // `maybe_msg` is safe to log as its exactly what the system told us.
@@ -194,21 +194,23 @@ impl Verifier {
                 match status {
                     VerifierStatus::Ok => {
                         // If everything else was OK, check the hostname.
-                        rustls::client::verify_server_name(
-                            &rustls::server::ParsedCertificate::try_from(end_entity)?,
-                            server_name,
-                        )
+                        if let Some((end_entity, server_name)) = end_entity.zip(server_name) {
+                            rustls::client::verify_server_name(
+                                &rustls::server::ParsedCertificate::try_from(end_entity)?,
+                                server_name,
+                            )
+                        } else { Ok(()) }
                     }
                     VerifierStatus::Unavailable => Err(TlsError::General(String::from(
                         "No system trust stores available",
                     ))),
                     VerifierStatus::Expired => Err(InvalidCertificate(CertificateError::Expired)),
                     VerifierStatus::UnknownCert => {
-                        log::warn!("certificate was not trusted: {}", maybe_msg.unwrap());
+                        log::warn!("certificate was not trusted: {maybe_msg:?}");
                         Err(InvalidCertificate(CertificateError::UnknownIssuer))
                     }
                     VerifierStatus::Revoked => {
-                        log::warn!("certificate was revoked: {}", maybe_msg.unwrap());
+                        log::warn!("certificate was revoked: {maybe_msg:?}");
                         Err(InvalidCertificate(CertificateError::Revoked))
                     }
                     VerifierStatus::InvalidEncoding => {
@@ -219,15 +221,12 @@ impl Verifier {
                     )),
                 }
             }
-            Err(e) => Err(TlsError::General(format!(
-                "failed to call native verifier: {:?}",
-                e
-            ))),
+            Err(e) => Err(TlsError::General(format!("failed to call native verifier: {e:?}"))),
         }
     }
 }
 
-fn extract_result_info(env: &JNIEnv<'_>, result: JObject<'_>) -> (VerifierStatus, Option<String>) {
+pub(crate) fn extract_result_info(env: &JNIEnv<'_>, result: JObject<'_>) -> (VerifierStatus, Option<String>) {
     let status_code = env
         .get_field(result, "code", "I")
         .and_then(|code| code.i())
@@ -258,16 +257,12 @@ fn extract_result_info(env: &JNIEnv<'_>, result: JObject<'_>) -> (VerifierStatus
 impl ServerCertVerifier for Verifier {
     fn verify_server_cert(
         &self,
-        end_entity: &rustls::Certificate,
-        intermediates: &[rustls::Certificate],
+        end_entity: &CertificateDer,
+        intermediates: &[CertificateDer],
         server_name: &rustls::ServerName,
-        // Android has no support for providing SCTs to the verifier,
-        // but it does consider them internally if the hostname matches a
-        // system-specified list.
-        _scts: &mut dyn Iterator<Item = &[u8]>,
         ocsp_response: &[u8],
-        now: SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, TlsError> {
+        now: rustls_pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, TlsError> {
         log_server_cert(end_entity);
 
         // Verify the server name is one that we support and extract a string to use
@@ -296,7 +291,7 @@ impl ServerCertVerifier for Verifier {
             ocsp_data,
             now,
         ) {
-            Ok(()) => Ok(rustls::client::ServerCertVerified::assertion()),
+            Ok(()) => Ok(rustls::client::danger::ServerCertVerified::assertion()),
             Err(e) => {
                 // This error only tells us what the system errored with, so it doesn't leak anything
                 // sensitive.
@@ -305,4 +300,22 @@ impl ServerCertVerifier for Verifier {
             }
         }
     }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        unimplemented!("Will never be used with TLS in @Wire context")
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> { unimplemented!("Will never be used with TLS in @Wire context") }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> { unimplemented!("Will never be used with TLS in @Wire context") }
 }

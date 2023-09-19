@@ -106,7 +106,15 @@ pub fn init_external(runtime: &'static dyn Runtime) {
 /// Wrapper for JNI errors that will log and clear exceptions
 /// It should generally be preferred to `jni::errors::Error`
 #[derive(Debug)]
-pub(super) struct Error;
+pub struct Error;
+
+impl std::error::Error for Error {}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
 
 impl From<JNIError> for Error {
     #[track_caller]
@@ -163,9 +171,9 @@ impl<'a> Context<'a> {
 /// Borrow the Android application context and execute the closure
 /// `with_context, ensuring locals are properly freed and exceptions
 /// are cleared.
-pub(super) fn with_context<F, T>(f: F) -> Result<T, Error>
-where
-    F: FnOnce(&Context) -> Result<T, Error>,
+pub(crate) fn with_context<F, T>(f: F) -> Result<T, Error>
+    where
+        F: FnOnce(&Context) -> Result<T, Error>,
 {
     let context = global().context()?;
     let env = context.env();

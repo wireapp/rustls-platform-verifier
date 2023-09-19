@@ -14,16 +14,17 @@
 //! immediately below to see which platforms run these tests.
 
 #![cfg(any(
-    windows,
-    target_os = "android",
-    target_os = "macos",
-    target_os = "linux"
+windows,
+target_os = "android",
+target_os = "macos",
+target_os = "linux",
+target_family = "wasm"
 ))]
 
 use super::TestCase;
 use crate::tests::assert_cert_error_eq;
 use crate::verification::{EkuError, Verifier};
-use rustls::{client::ServerCertVerifier, CertificateError, Error as TlsError};
+use rustls::{client::danger::ServerCertVerifier, CertificateError, Error as TlsError};
 use std::convert::TryFrom;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -37,6 +38,7 @@ macro_rules! mock_root_test_cases {
             $(
                 #[cfg($target)]
                 #[test]
+                // #[wasm_bindgen_test::wasm_bindgen_test]
                 pub fn $name() {
                     super::$name()
                 }
@@ -56,6 +58,7 @@ macro_rules! mock_root_test_cases {
     {@ $( $name:ident [ $target:meta ] => $test_case:expr ),+ , } => {
         $(
             #[cfg($target)]
+            // #[wasm_bindgen_test::wasm_bindgen_test]
             pub(super) fn $name() {
                 test_with_mock_root(&$test_case);
             }
@@ -85,17 +88,16 @@ pub(super) fn verification_without_mock_root() {
     let verifier = crate::verifier_for_testing();
 
     let server_name = rustls::client::ServerName::try_from(EXAMPLE_COM).unwrap();
-    let end_entity = rustls::Certificate(ROOT1_INT1_EXAMPLE_COM_GOOD.to_vec());
-    let intermediates = [rustls::Certificate(ROOT1_INT1.to_vec())];
+    let end_entity = rustls_pki_types::CertificateDer::from(ROOT1_INT1_EXAMPLE_COM_GOOD.to_vec());
+    let intermediates = [rustls_pki_types::CertificateDer::from(ROOT1_INT1.to_vec())];
 
     // Fails because the server cert has no trust root in Windows, and can't since it uses a self-signed CA.
     let result = verifier.verify_server_cert(
         &end_entity,
         &intermediates,
         &server_name,
-        &mut std::iter::empty(),
         &[],
-        std::time::SystemTime::now(),
+        rustls_pki_types::UnixTime::now(),
     );
 
     assert_eq!(
@@ -264,10 +266,10 @@ fn test_with_mock_root<E: std::error::Error + PartialEq + 'static>(test_case: &T
     let mut chain = test_case
         .chain
         .iter()
-        .map(|bytes| rustls::Certificate(bytes.to_vec()));
+        .map(|bytes| rustls_pki_types::CertificateDer::from(bytes.to_vec()));
 
     let end_entity = chain.next().unwrap();
-    let intermediates: Vec<rustls::Certificate> = chain.collect();
+    let intermediates: Vec<rustls_pki_types::CertificateDer> = chain.collect();
 
     let server_name = rustls::client::ServerName::try_from(test_case.reference_id).unwrap();
 
@@ -287,9 +289,8 @@ fn test_with_mock_root<E: std::error::Error + PartialEq + 'static>(test_case: &T
         &end_entity,
         &intermediates,
         &server_name,
-        &mut std::iter::empty(),
         test_case.stapled_ocsp.unwrap_or(&[]),
-        std::time::SystemTime::now(),
+        rustls_pki_types::UnixTime::now(),
     );
 
     assert_cert_error_eq(

@@ -2,21 +2,28 @@ use super::{log_server_cert, unsupported_server_name};
 use crate::verification::invalid_certificate;
 use core_foundation::date::CFDate;
 use core_foundation_sys::date::kCFAbsoluteTimeIntervalSince1970;
-use rustls::{client::ServerCertVerifier, CertificateError, Error as TlsError};
+use rustls::{
+    client::danger::{ServerCertVerifier, HandshakeSignatureValid},
+    CertificateError,
+    Error as TlsError,
+    DigitallySignedStruct,
+    SignatureScheme,
+};
 use security_framework::{
     certificate::SecCertificate, policy::SecPolicy, secure_transport::SslProtocolSide,
     trust::SecTrust,
 };
-use std::time::SystemTime;
+use rustls_pki_types::CertificateDer;
 
 mod errors {
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
     pub(super) use security_framework_sys::base::{
         errSecCertificateRevoked, errSecCreateChainFailed, errSecHostNameMismatch,
         errSecInvalidExtendedKeyUsage,
     };
 }
 
-fn system_time_to_cfdate(time: SystemTime) -> Result<CFDate, TlsError> {
+fn system_time_to_cfdate(time: rustls_pki_types::UnixTime) -> Result<CFDate, TlsError> {
     // SAFETY: The interval is defined by macOS externally, but is always present and never modified at runtime
     // since its a global variable.
     //
@@ -29,12 +36,18 @@ fn system_time_to_cfdate(time: SystemTime) -> Result<CFDate, TlsError> {
     // Convert a system timestamp based off the UNIX epoch into the
     // Apple epoch used by all `CFAbsoluteTime` values.
     // Subtracting Durations with sub() will panic on overflow
+    core::time::Duration::from_secs(time.as_secs())
+        .checked_sub(unix_adjustment)
+        .ok_or(TlsError::FailedToGetCurrentTime)
+        .map(|epoch| CFDate::new(epoch.as_secs() as f64))
+    /*
     #[allow(clippy::as_conversions)]
     time.duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|_| TlsError::FailedToGetCurrentTime)?
         .checked_sub(unix_adjustment)
         .ok_or(TlsError::FailedToGetCurrentTime)
         .map(|epoch| CFDate::new(epoch.as_secs() as f64))
+        */
 }
 
 /// A TLS certificate verifier that utilizes the Apple platform certificate facilities.
@@ -57,7 +70,7 @@ impl Verifier {
 
     /// Creates a test-only TLS certificate verifier which trusts our fake root CA cert.
     #[cfg(any(test, feature = "ffi-testing", feature = "dbg"))]
-    pub(crate) fn new_with_fake_root(root: &[u8]) -> Self {
+    pub fn new_with_fake_root(root: &[u8]) -> Self {
         Self {
             test_only_root_ca_override: Some(root.into()),
         }
@@ -65,14 +78,14 @@ impl Verifier {
 
     fn verify_certificate(
         &self,
-        end_entity: &rustls::Certificate,
-        intermediates: &[rustls::Certificate],
+        end_entity: &CertificateDer,
+        intermediates: &[CertificateDer],
         server_name: &str,
         ocsp_response: Option<&[u8]>,
-        now: SystemTime,
+        now: rustls_pki_types::UnixTime,
     ) -> Result<(), TlsError> {
-        let certificates: Vec<SecCertificate> = std::iter::once(end_entity.0.as_slice())
-            .chain(intermediates.iter().map(|cert| cert.0.as_slice()))
+        let certificates: Vec<SecCertificate> = std::iter::once(end_entity.as_ref())
+            .chain(intermediates.iter().map(|cert| cert.as_ref()))
             .map(|cert| {
                 SecCertificate::from_der(cert)
                     .map_err(|_| TlsError::InvalidCertificate(CertificateError::BadEncoding))
@@ -183,13 +196,12 @@ impl Verifier {
 impl ServerCertVerifier for Verifier {
     fn verify_server_cert(
         &self,
-        end_entity: &rustls::Certificate,
-        intermediates: &[rustls::Certificate],
+        end_entity: &rustls_pki_types::CertificateDer,
+        intermediates: &[rustls_pki_types::CertificateDer],
         server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
         ocsp_response: &[u8],
-        now: SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, TlsError> {
+        now: rustls_pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, TlsError> {
         log_server_cert(end_entity);
 
         // Convert IP addresses to name strings to ensure match check on leaf certificate.
@@ -212,7 +224,7 @@ impl ServerCertVerifier for Verifier {
         };
 
         match self.verify_certificate(end_entity, intermediates, server, ocsp_data, now) {
-            Ok(()) => Ok(rustls::client::ServerCertVerified::assertion()),
+            Ok(()) => Ok(rustls::client::danger::ServerCertVerified::assertion()),
             Err(e) => {
                 // This error only tells us what the system errored with, so it doesn't leak anything
                 // sensitive.
@@ -220,5 +232,17 @@ impl ServerCertVerifier for Verifier {
                 Err(e)
             }
         }
+    }
+
+    fn verify_tls12_signature(&self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, TlsError> {
+        unimplemented!("Will never be used with TLS in @Wire context")
+    }
+
+    fn verify_tls13_signature(&self, _message: &[u8], _cert: &CertificateDer<'_>, _dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, TlsError> {
+        unimplemented!("Will never be used with TLS in @Wire context")
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        unimplemented!("Will never be used with TLS in @Wire context")
     }
 }

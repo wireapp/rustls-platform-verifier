@@ -1,5 +1,8 @@
-/target
 .DS_Store
 /.idea
 
 /android/verification/
+
+### Rust ###
+Cargo.lock
+/target

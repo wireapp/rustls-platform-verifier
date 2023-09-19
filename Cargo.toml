@@ -7,7 +7,6 @@ keywords = ["tls", "certificate", "verification", "os", "native"]
 repository = "https://github.com/1Password/rustls-platform-verifier"
 license = "MIT OR Apache-2.0"
 edition = "2021"
-rust-version = "1.64.0"
 
 exclude = [
     "android/.run",
@@ -34,29 +33,39 @@ dbg = []
 # by the platform's verifier.
 cert-logging = ["base64"]
 # Used for nicely documenting the Android-specific APIs. This feature is not stable.
-docsrs = ["jni", "once_cell"]
+docsrs = ["jni"]
+ring = ["rustls/ring"]
 
 [dependencies]
-rustls = { version = "0.21", features = ["dangerous_configuration", "tls12", "logging"] }
 log = { version = "0.4" }
 base64 = { version = "0.21", optional = true } # Only used when the `cert-logging` feature is enabled.
 jni = { version = "0.19", default-features = false, optional = true } # Only used during doc generation
-once_cell = { version = "1.9", optional = true } # Only used during doc generation.
+once_cell = "1.9" # Only used during doc generation.
+fluvio-wasm-timer = "0.2"
+rustls-pki-types = "0.2"
+untrusted = "0.9"
+webpki = { package = "rustls-webpki", version = "0.102.0-alpha.3", features = ["alloc", "std"] }
+thiserror = "1.0"
+
+x509-cert = "0.2"
+certval = { path = "../rust-pki/certval" }
+
+[dependencies.rustls]
+version = "0.22.0-alpha.3"
+features = ["tls12", "logging"]
+path = "../rustls/rustls"
+default-features = false
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustls-native-certs = "0.6"
-once_cell = "1.9"
-webpki = { package = "rustls-webpki", version = "0.101", features = ["alloc", "std"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { version = "0.19", default-features = false }
-webpki = { package = "rustls-webpki", version = "0.101", features = ["alloc", "std"] }
-once_cell = "1.9"
 android_logger = { version = "0.13", optional = true } # Only used during testing.
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-once_cell = "1.9"
 webpki-roots = "0.25"
+async-trait = "0.1"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 core-foundation = "0.9"
@@ -68,9 +77,21 @@ security-framework-sys = { version = "2.4", features = ["OSX_10_14"] }
 winapi = { version = "0.3", features = ["wincrypt", "winerror"] }
 
 [dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tokio = { version = "1.5", features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "0.11.18", default-features = false, features = ["rustls-tls-manual-roots"] }
+async-std = { version = "1.12", features = ["attributes"] }
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
 features = ["dbg", "docsrs"]
+
+[patch.crates-io.webpki]
+package = "rustls-webpki"
+path = "../webpki"
+
+[patch.crates-io.pki-types]
+package = "rustls-pki-types"
+path = "../pki-types"
